@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     synthesis_system_prompt_tokens: int = 800
 
     # Evaluation
-    eval_k_values: list[int] = [5, 10]
+    eval_k_values: list[int | str] = [5, 10, "all"]
     alpha: float = 0.05
 
     class Config:

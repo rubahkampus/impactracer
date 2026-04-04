@@ -113,14 +113,14 @@ impactracer/
 │   ├── synthesizer.py       LLM Call 3 (ImpactReport synthesis)
 │   └── runner.py            Full pipeline orchestrator
 └── eval/
-    ├── annotator_tool.py    CLI helper for AIS ground truth
+    ├── annotator_tool.py    CLI helper for Ground Truth (GT)
     ├── metrics.py           P@K, R@K, F1@K, MRR computation
-    └── ablation.py          Five-variant ablation study runner
+    └── ablation.py          Six-variant ablation study runner
 ```
 
 ## Evaluation
 
-The evaluation framework supports five ablation variants (B0, B1, B2, S1, S2) executed via the `eval/ablation.py` module. All variants operate on the same indexed data. Statistical significance is assessed via Wilcoxon signed-rank test on paired F1@10 differences. Refer to the thesis Chapter III Section 7 for the full evaluation protocol.
+The evaluation framework supports six ablation variants (B0, B1, B2, B3, S1, S2) executed via the `eval/ablation.py` module. All variants operate on the same indexed data. Statistical significance is assessed via Wilcoxon signed-rank test on paired F1@10 differences. Refer to the thesis Chapter III Section 7 for the full evaluation protocol.
 
 ## License
 

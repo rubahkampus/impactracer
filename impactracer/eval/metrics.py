@@ -4,11 +4,11 @@ IR Metrics — Precision, Recall, F1, MRR Computation
 
 RESPONSIBILITY
     Computes standard Information Retrieval metrics for evaluating
-    the system output (CIS) against the ground truth (AIS).
+    the system output (CIS) against the ground truth (GT).
 
 METRICS (per Subbab III.7.4, Manning et al. 2008)
-    Precision@K = |CIS_K intersect AIS| / |CIS_K|
-    Recall@K    = |CIS_K intersect AIS| / |AIS|
+    Precision@K = |CIS_K intersect GT| / |CIS_K|
+    Recall@K    = |CIS_K intersect GT| / |GT|
     F1@K        = 2 * P@K * R@K / (P@K + R@K)
     MRR         = (1/|Q|) * sum(1/rank_q) for q in Q
 
@@ -25,7 +25,7 @@ METRICS (per Subbab III.7.4, Manning et al. 2008)
 
 INPUTS
     predicted: list[str] (sorted node IDs from CIS).
-    actual: set[str] (node IDs from AIS ground truth).
+    actual: set[str] (node IDs from GT).
 
 OUTPUTS
     Dict of metric name to float value.

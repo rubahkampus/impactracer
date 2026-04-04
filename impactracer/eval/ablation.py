@@ -1,28 +1,29 @@
 """
-Ablation Study Controller — Five-Variant Experiment Runner
+Ablation Study Controller — Six-Variant Experiment Runner
 ===========================================================
 
 RESPONSIBILITY
-    Executes the five ablation variants (B0, B1, B2, S1, S2) on
+    Executes the six ablation variants (B0, B1, B2, B3, S1, S2) on
     the 20-CR test set with locked parameters and collects per-CR
     metrics for statistical analysis.
 
 VARIANTS (per Subbab III.7.3)
     B0  BM25 only.            No dense, no reranker, no LLM, no BFS.
     B1  Dense only.           No BM25, no reranker, no LLM, no BFS.
-    B2  RRF hybrid + reranker. No LLM validation, no BFS.
+    B2  RRF hybrid.           BM25 + dense, no reranker, no LLM, no BFS.
+    B3  RRF hybrid + reranker. No LLM validation, no BFS.
     S1  RRF + reranker + LLM. No BFS. CIS = SIS.
     S2  Full system.          RRF + reranker + LLM + BFS.
 
-    For B0/B1/B2 (no LLM validation): top-K retrieval results
+    For B0/B1/B2/B3 (no LLM validation): top-K retrieval results
     ARE the output. No SIS filtering step.
-    For B0/B1/B2/S1 (no BFS): CIS = retrieval/SIS output.
+    For B0/B1/B2/B3/S1 (no BFS): CIS = retrieval/SIS output.
     No structural propagation.
 
 INPUTS
     cr_list: list of (cr_id, cr_text) tuples.
     ais: dict mapping cr_id to set of node IDs (ground truth).
-    variant: str in {"B0", "B1", "B2", "S1", "S2"}.
+    variant: str in {"B0", "B1", "B2", "B3", "S1", "S2"}.
     settings: Settings object.
 
 OUTPUTS

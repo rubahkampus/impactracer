@@ -4,7 +4,7 @@ Annotator Tool — CLI Helper for AIS Construction
 
 RESPONSIBILITY
     Provides a CLI interface for human annotators to construct
-    the Actual Impact Set (AIS) ground truth. Displays code nodes
+    the Ground Truth (GT). Displays code nodes
     and document chunks from the indexed repository and records
     annotator decisions.
 
