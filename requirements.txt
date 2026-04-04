@@ -1,0 +1,38 @@
+# ImpacTracer Dependencies
+# Python >= 3.11 required
+
+# CLI Framework
+typer[all]>=0.12
+python-dotenv>=1.0
+loguru>=0.7
+
+# AST Parsing (Offline Indexer)
+tree-sitter>=0.22
+tree-sitter-languages>=1.10.2
+mistune>=3.0
+
+# Embedding and Reranking (Local Inference)
+FlagEmbedding>=1.2.5
+
+# Vector Store (File-Backed, Zero Server)
+chromadb>=0.5.0
+
+# Sparse Retrieval
+rank_bm25>=0.2.2
+
+# Structural Graph (In-Memory BFS)
+networkx>=3.2
+
+# LLM Interface and Schema Enforcement
+openai>=1.30,<2.0
+pydantic>=2.7
+pydantic-settings>=2.2
+tiktoken>=0.7
+
+# Numerical Computation
+numpy>=1.26
+scipy>=1.13
+
+# Evaluation
+scikit-learn>=1.5
+pandas>=2.2
