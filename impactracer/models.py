@@ -60,23 +60,22 @@ class CRInterpretation(BaseModel):
         ),
     )
     primary_intent: str = Field(
-        default="",
         description="Single sentence stating what is being changed and why.",
     )
-    change_type: Literal["add", "modify", "remove"] = "modify"
-    affected_layers: list[Literal["requirement", "design", "code"]] = Field(
-        default_factory=lambda: ["code"]
-    )
+    change_type: Literal["add", "modify", "remove"]
+    affected_layers: list[Literal["requirement", "design", "code"]]
     affected_domain_concepts: list[str] = Field(
-        default_factory=list,
         description="Business domain concepts, explicit and implied.",
+        min_length=1,
+        max_length=10,
     )
     search_queries: list[str] = Field(
-        default_factory=list,
         description=(
             "2-3 English technical phrases optimized for vector search "
             "against code function signatures and doc section titles."
         ),
+        min_length=2,
+        max_length=3,
     )
 
 

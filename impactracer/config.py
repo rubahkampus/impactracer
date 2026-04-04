@@ -29,8 +29,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # LLM
-    openai_api_key: str = ""
-    openai_base_url: str = "https://openrouter.ai/api/v1"
+    openai_api_key: str
     llm_model: str = "gpt-4o-mini"
     llm_temperature: float = 0.0
     llm_seed: int = 42
@@ -65,6 +64,7 @@ class Settings(BaseSettings):
     # Context Window
     llm_max_context_tokens: int = 100_000
     synthesis_system_prompt_tokens: int = 800
+    tokens_per_cis_node: int = 250
 
     # Evaluation
     eval_k_values: list[int | str] = [5, 10, "all"]
