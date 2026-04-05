@@ -71,6 +71,7 @@ class GeminiClient:
         self._client = genai.Client(api_key=settings.google_api_key)
         self._model = settings.llm_model
         self._temperature = settings.llm_temperature
+        self._last_text: str = ""  # raw response text from the last parse() call
 
     # ------------------------------------------------------------------
     # Public API
@@ -115,6 +116,10 @@ class GeminiClient:
                 temperature=self._temperature,
             ),
         )
+
+        # Always persist the raw response text so callers can access it
+        # for post-processing (e.g. truncating overlong fields in synthesizer).
+        self._last_text = response.text or ""
 
         # SDK >= 1.0 populates response.parsed as a Pydantic model
         # instance when response_schema is a BaseModel subclass.

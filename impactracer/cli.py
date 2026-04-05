@@ -269,10 +269,51 @@ def analyze(
     cr_text: str = typer.Argument(..., help="Change Request text in natural language."),
     output: str = typer.Option("./outputs/impact_report.json", "-o", "--output"),
 ) -> None:
-    """Analyze a Change Request against the indexed repository."""
-    typer.echo("Running impact analysis...")
-    # TODO: Wire to pipeline.runner.run_analysis()
-    typer.echo(f"Report written to {output}")
+    """Analyze a Change Request and produce a structured Impact Report.
+
+    Pipeline (exactly 3 LLM calls for an actionable CR):
+      1. LLM Call #1 — Interpret CR + GIGO validation.
+      2. Hybrid search + RRF + BGE-Reranker (zero LLM).
+      3. LLM Call #2 — Validate SIS candidates.
+      4. Seed resolution + BFS propagation (zero LLM).
+      5. LLM Call #3 — Synthesize ImpactReport JSON.
+    """
+    import json
+
+    from impactracer.config import Settings
+    from impactracer.pipeline.runner import run_analysis
+
+    t_start = time.perf_counter()
+    settings = Settings()
+
+    typer.echo("[ImpacTracer] Starting analysis...")
+    typer.echo(f"[ImpacTracer] CR: {cr_text[:120]}{'...' if len(cr_text) > 120 else ''}")
+
+    try:
+        report = run_analysis(cr_text, settings)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1)
+
+    # Write JSON output
+    out_path = Path(output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        report.model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+
+    elapsed = time.perf_counter() - t_start
+
+    typer.echo(f"\n{'=' * 60}")
+    typer.echo("ANALYSIS COMPLETE")
+    typer.echo(f"{'=' * 60}")
+    typer.echo(f"  Scope          : {report.estimated_change_scope}")
+    typer.echo(f"  Impacted items : {len(report.impacted_items)}")
+    typer.echo(f"  Conflicts      : {len(report.requirement_conflicts)}")
+    typer.echo(f"  Elapsed        : {elapsed:.1f}s")
+    typer.echo(f"  Report         : {out_path}")
+    typer.echo(f"{'=' * 60}")
 
 
 if __name__ == "__main__":
