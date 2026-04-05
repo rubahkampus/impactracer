@@ -94,7 +94,7 @@ def store_doc_code_candidates(
     conn.executemany(
         """
         INSERT OR REPLACE INTO doc_code_candidates
-            (code_node_id, doc_chunk_id, similarity_score)
+            (code_id, doc_id, similarity)
         VALUES (?, ?, ?)
         """,
         candidates,

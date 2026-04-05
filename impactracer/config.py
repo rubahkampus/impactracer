@@ -29,7 +29,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # LLM
-    openai_api_key: str
+    openai_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
     llm_temperature: float = 0.0
     llm_seed: int = 42
@@ -73,3 +73,4 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"
