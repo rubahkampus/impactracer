@@ -30,7 +30,7 @@ networkx>=3.2
 pydantic>=2.7
 pydantic-settings>=2.2
 tiktoken>=0.7
-google-genai>=0.3.0
+google-genai>=1.0.0
 
 # Numerical Computation
 numpy>=1.26
