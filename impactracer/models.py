@@ -12,6 +12,10 @@ SCHEMAS DEFINED
        Includes is_actionable for GIGO validation and rejection_reason
        for early termination per Subbab III.2.2.1.
     2. CandidateVerdict and SISValidationResult (LLM Call #2 output).
+       CandidateVerdict uses a 5-field structured Chain-of-Thought schema:
+       function_purpose → mechanism_of_impact → justification → confirmed.
+       Fields are defined in reasoning-first order so the LLM must complete
+       all reasoning steps before emitting the binary verdict.
     3. ImpactedItem and ImpactReport (LLM Call #3 output, 4 top-level
        attributes per Subbab III.2.5.3).
     4. NodeTrace and CISResult (BFS output, deterministic dataclasses).
@@ -115,11 +119,50 @@ class CRInterpretation(BaseModel):
 # ── LLM Call #2 Output ─────────────────────────────────────────────
 
 class CandidateVerdict(TruncatingModel):
-    """Per-candidate confirmation or rejection from LLM validation."""
+    """Per-candidate confirmation or rejection from LLM validation.
 
-    node_id: str
-    confirmed: bool
-    justification: str = Field(max_length=200)
+    Fields are ordered to enforce Chain-of-Thought reasoning before
+    the binary verdict is produced. Because Gemini generates JSON fields
+    in schema-definition order, placing `confirmed` last forces the model
+    to complete all three reasoning steps first.
+
+    CoT Step 1 — function_purpose:   What does this node do?
+    CoT Step 2 — mechanism_of_impact: How exactly does the CR require it
+                                       to change? (empty = reject signal)
+    CoT Step 3 — justification:       Final one-sentence summary.
+    Verdict    — confirmed:            Binary decision, produced last.
+    """
+
+    node_id: str = Field(description="The candidate's node_id, copied verbatim.")
+    function_purpose: str = Field(
+        max_length=150,
+        description=(
+            "One sentence describing what this function/interface does "
+            "in the business domain, based solely on its snippet."
+        ),
+    )
+    mechanism_of_impact: str = Field(
+        max_length=200,
+        description=(
+            "The concrete mechanism by which the CR's change would require "
+            "modification of this specific node — e.g. 'This function creates "
+            "a new listing and must be extended to accept a source listing ID.' "
+            "Leave EMPTY if no direct modification mechanism exists. "
+            "Topical relevance or same-file co-location are NOT valid mechanisms."
+        ),
+    )
+    justification: str = Field(
+        max_length=200,
+        description=(
+            "One-sentence summary of the confirmation or rejection decision."
+        ),
+    )
+    confirmed: bool = Field(
+        description=(
+            "True only if mechanism_of_impact is non-empty AND describes a "
+            "direct structural dependency on the CR's change. False otherwise."
+        ),
+    )
 
 
 class SISValidationResult(BaseModel):
@@ -140,7 +183,7 @@ class ImpactedItem(TruncatingModel):
     causal_chain: list[str] = Field(
         description="Ordered edge types from SIS root to this node."
     )
-    structural_justification: str = Field(max_length=300)
+    structural_justification: str = Field(max_length=200)
     traceability_backlinks: list[str] = Field(default_factory=list)
 
 
