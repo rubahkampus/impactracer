@@ -31,9 +31,42 @@ ARCHITECTURAL CONSTRAINTS
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+# ── Shared Base Model ─────────────────────────────────────────────
+
+class TruncatingModel(BaseModel):
+    """Pydantic base model with graceful LLM output string truncation.
+
+    LLMs cannot reliably count characters, so string fields constrained
+    by max_length may be exceeded.  This validator intercepts raw input
+    before field-level validation and silently truncates any overlong
+    string to its field's declared max_length, preventing ValidationError
+    crashes in the pipeline.
+
+    Architectural rule: All LLM-generated string fields must utilise
+    graceful truncation fallback mechanisms to prevent pipeline crashes
+    from Pydantic strict length limits.
+    """
+
+    @model_validator(mode='before')
+    @classmethod
+    def _truncate_overlong_strings(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        for field_name, field_info in cls.model_fields.items():
+            value = data.get(field_name)
+            if not isinstance(value, str):
+                continue
+            for meta in field_info.metadata:
+                max_len = getattr(meta, 'max_length', None)
+                if max_len is not None and len(value) > max_len:
+                    data[field_name] = value[:max_len]
+                    break
+        return data
 
 
 # ── LLM Call #1 Output ─────────────────────────────────────────────
@@ -81,7 +114,7 @@ class CRInterpretation(BaseModel):
 
 # ── LLM Call #2 Output ─────────────────────────────────────────────
 
-class CandidateVerdict(BaseModel):
+class CandidateVerdict(TruncatingModel):
     """Per-candidate confirmation or rejection from LLM validation."""
 
     node_id: str
@@ -97,7 +130,7 @@ class SISValidationResult(BaseModel):
 
 # ── LLM Call #3 Output ─────────────────────────────────────────────
 
-class ImpactedItem(BaseModel):
+class ImpactedItem(TruncatingModel):
     """Single impacted element in the final report."""
 
     node_id: str
@@ -111,7 +144,7 @@ class ImpactedItem(BaseModel):
     traceability_backlinks: list[str] = Field(default_factory=list)
 
 
-class ImpactReport(BaseModel):
+class ImpactReport(TruncatingModel):
     """Final structured impact analysis report.
 
     This schema is enforced via response_format on LLM Call #3.
