@@ -28,11 +28,12 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # LLM
+    # LLM — Google Gemini (primary); openai_api_key kept for future reference
+    google_api_key: str = ""
     openai_api_key: str = ""
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = "gemini-2.5-flash"
     llm_temperature: float = 0.0
-    llm_seed: int = 42
+    llm_seed: int = 42  # informational; Gemini uses temperature=0 for determinism
 
     # Embedding and Reranking
     embedding_model: str = "BAAI/bge-m3"
