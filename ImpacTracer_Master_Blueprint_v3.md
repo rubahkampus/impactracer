@@ -1,11 +1,15 @@
 # Master Implementation Blueprint for ImpacTracer
 
-**Version:** 3.0 (Master) | **Status:** LOCKED PRE-IMPLEMENTATION  
+**Version:** 3.1 (Master) | **Status:** LOCKED PRE-IMPLEMENTATION
 **Target Runtime:** Python 3.11+ | **Execution Model:** Local CLI, zero managed services
 
 ---
 
 ## 0. Changelog
+
+### v3.1 Changes from v3.0
+
+- **[CRITICAL] Universal graceful truncation added to all LLM output models.** Introduced `TruncatingModel`, a shared Pydantic `BaseModel` subclass in `models.py`. It carries a `@model_validator(mode='before')` that inspects every string field for a declared `max_length` constraint and silently truncates the value to that limit before Pydantic runs field-level validation. `CandidateVerdict`, `ImpactedItem`, and `ImpactReport` now inherit from `TruncatingModel` instead of `BaseModel`. **Motivation:** LLMs cannot reliably count characters; strict `max_length` constraints were causing `ValidationError` pipeline crashes (observed in Step 4, LLM Call #2 `CandidateVerdict.justification`). The architectural rule is stated below in §2 and applies to all future LLM output schemas in this project.
 
 ### v3.0 Changes from v2.0 (Chapter III Alignment Audit)
 
@@ -81,12 +85,48 @@ pandas >= 2.2                      # Result aggregation
 
 ## 2. Data Models (Pydantic v2 Schemas)
 
+> **Architectural Rule — LLM String Truncation (v3.1):**
+> All LLM-generated string fields **must** utilise graceful truncation fallback
+> mechanisms to prevent pipeline crashes from Pydantic strict length limits.
+> LLMs cannot reliably count characters; rather than raising `ValidationError`
+> when `max_length` is exceeded, every LLM output schema MUST inherit from
+> `TruncatingModel` (see below). The `@model_validator(mode='before')` in that
+> base class silently truncates any overlong string to its declared limit before
+> field-level validation runs. Future LLM output schemas added to this project
+> MUST also inherit from `TruncatingModel`.
+
 ```python
 # models.py
 from __future__ import annotations
-from pydantic import BaseModel, Field
-from typing import Literal
+from pydantic import BaseModel, Field, model_validator
+from typing import Any, Literal
 from dataclasses import dataclass, field
+
+# ── Shared Base Model (v3.1) ─────────────────────────────────────────
+
+class TruncatingModel(BaseModel):
+    """Base model with graceful LLM output string truncation.
+
+    Silently truncates any string field that exceeds its declared max_length
+    before Pydantic runs field-level validation, preventing ValidationError
+    crashes caused by LLMs that cannot reliably count characters.
+    """
+    @model_validator(mode='before')
+    @classmethod
+    def _truncate_overlong_strings(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        for field_name, field_info in cls.model_fields.items():
+            value = data.get(field_name)
+            if not isinstance(value, str):
+                continue
+            for meta in field_info.metadata:
+                max_len = getattr(meta, 'max_length', None)
+                if max_len is not None and len(value) > max_len:
+                    data[field_name] = value[:max_len]
+                    break
+        return data
+
 
 # ── LLM Call #1: CR Interpretation ──────────────────────────────────
 
@@ -118,7 +158,7 @@ class CRInterpretation(BaseModel):
 
 # ── LLM Call #2: SIS Validation ────────────────────────────────────
 
-class CandidateVerdict(BaseModel):
+class CandidateVerdict(TruncatingModel):  # TruncatingModel: truncates justification if > 200 chars
     node_id: str
     confirmed: bool
     justification: str = Field(max_length=200)
@@ -129,7 +169,7 @@ class SISValidationResult(BaseModel):
 
 # ── LLM Call #3: Impact Report ─────────────────────────────────────
 
-class ImpactedItem(BaseModel):
+class ImpactedItem(TruncatingModel):  # TruncatingModel: truncates structural_justification if > 300 chars
     node_id: str
     node_type: str
     file_path: str
@@ -140,7 +180,7 @@ class ImpactedItem(BaseModel):
     structural_justification: str = Field(max_length=300)
     traceability_backlinks: list[str] = Field(default_factory=list)
 
-class ImpactReport(BaseModel):
+class ImpactReport(TruncatingModel):  # TruncatingModel: truncates executive_summary if > 800 chars
     executive_summary: str = Field(max_length=800)
     impacted_items: list[ImpactedItem]
     requirement_conflicts: list[str] = Field(default_factory=list)
