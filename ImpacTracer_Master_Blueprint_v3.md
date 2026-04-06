@@ -158,10 +158,12 @@ class CRInterpretation(BaseModel):
 
 # ── LLM Call #2: SIS Validation ────────────────────────────────────
 
-class CandidateVerdict(TruncatingModel):  # TruncatingModel: truncates justification if > 200 chars
-    node_id: str
-    confirmed: bool
-    justification: str = Field(max_length=200)
+class CandidateVerdict(TruncatingModel):  # truncates function_purpose/mechanism_of_impact/justification
+    node_id: str = Field(description="The candidate's node_id, copied verbatim.")
+    function_purpose: str = Field(max_length=150, description="One sentence: what this node does.")
+    mechanism_of_impact: str = Field(max_length=200, description="Concrete modification mechanism, or EMPTY to reject.")
+    justification: str = Field(max_length=200, description="One-sentence confirmation/rejection summary.")
+    confirmed: bool = Field(description="True only if mechanism_of_impact is non-empty and structural.")
 
 class SISValidationResult(BaseModel):
     verdicts: list[CandidateVerdict]
@@ -169,7 +171,7 @@ class SISValidationResult(BaseModel):
 
 # ── LLM Call #3: Impact Report ─────────────────────────────────────
 
-class ImpactedItem(TruncatingModel):  # TruncatingModel: truncates structural_justification if > 300 chars
+class ImpactedItem(TruncatingModel):  # TruncatingModel: truncates structural_justification if > 200 chars
     node_id: str
     node_type: str
     file_path: str
@@ -177,7 +179,7 @@ class ImpactedItem(TruncatingModel):  # TruncatingModel: truncates structural_ju
     causal_chain: list[str] = Field(
         description="Ordered edge types from SIS root to this node."
     )
-    structural_justification: str = Field(max_length=300)
+    structural_justification: str = Field(max_length=200)
     traceability_backlinks: list[str] = Field(default_factory=list)
 
 class ImpactReport(TruncatingModel):  # TruncatingModel: truncates executive_summary if > 800 chars
