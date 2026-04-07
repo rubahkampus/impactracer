@@ -5,7 +5,7 @@ CR Interpreter -- LLM Call #1 (GIGO Validation + Semantic Extraction)
 RESPONSIBILITY
     Receives raw CR text in natural language (typically Indonesian).
     Sends it to Gemini with a structured output schema to produce a
-    CRInterpretation object with 7 attributes.
+    CRInterpretation object with 8 attributes.
 
     GIGO VALIDATION (per Subbab III.2.2.1):
     The LLM FIRST assesses is_actionable.  If the CR is too vague,
@@ -29,6 +29,12 @@ SYSTEM PROMPT DESIGN
          because they are matched against English code identifiers and
          doc section titles.
       4. Include both explicit and implied domain concepts.
+      5. Fix A (v3.1): Extract excluded_operations — 2-4 English phrases
+         naming business operations that are EXPLICITLY out of scope.
+         These are injected into LLM Call #2 as a hard DO NOT confirm list
+         to prevent retrieval false positives from topically related but
+         functionally unaffected modules (e.g. the "Duplicate Commission"
+         CR should exclude "order slot management", "contract lifecycle").
 
 ARCHITECTURAL CONSTRAINTS
     1. This is LLM Call #1 of exactly 3 permitted calls.
@@ -73,6 +79,20 @@ STEP 2 -- Semantic extraction (only when is_actionable=true):
                              MUST be in English even if the CR is in Indonesian.
                              Example: ["theme toggle component", "user preference
                              settings API", "dark mode CSS variable"].
+  excluded_operations:       2-4 English phrases naming business operations that
+                             are EXPLICITLY OUT OF SCOPE for this CR.
+                             These describe what the CR does NOT change — i.e.
+                             adjacent modules that share domain vocabulary but
+                             whose code will NOT be modified.
+                             Think: "what other parts of the system use similar
+                             terminology but are completely unrelated to this
+                             specific feature change?"
+                             Example: if the CR adds a "duplicate listing" feature,
+                             excluded_operations = ["order slot management",
+                             "contract lifecycle processing",
+                             "payment and escrow operations"].
+                             Leave as [] only if no meaningful out-of-scope
+                             operations can be identified.
 
 Return valid JSON matching the schema exactly."""
 

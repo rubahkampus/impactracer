@@ -8,7 +8,8 @@ RESPONSIBILITY
     confirmed/rejected verdicts that form the SIS.
 
 INPUTS
-    cr_interp: CRInterpretation (for primary_intent and domain concepts).
+    cr_interp: CRInterpretation (for primary_intent, domain concepts,
+               and excluded_operations).
     candidates: list of dicts (from reranker, sorted by reranker_score).
     client: GeminiClient instance.
 
@@ -29,6 +30,19 @@ ARCHITECTURAL CONSTRAINTS
     3. Each candidate snippet truncated to 400 chars max.
     4. temperature=0.0, seed=42 per NFR-07.
     5. response_schema=SISValidationResult enforces JSON schema.
+
+FIX A (v3.1) — excluded_operations injection:
+    If CRInterpretation.excluded_operations is non-empty, a hard
+    DO NOT confirm section is prepended to the user prompt.  This
+    prevents the LLM from confirming candidates that belong to
+    operations explicitly identified as out-of-scope by LLM Call #1.
+
+FIX B (v3.1) — enriched candidate block:
+    Each candidate entry now includes File (file_path) and
+    Reranker score fields.  Showing the source module path gives
+    the LLM architectural context to identify cross-domain false
+    positives (e.g. a contract-service function surfaced for a
+    listing-form CR).  The reranker score signals relative confidence.
 """
 from __future__ import annotations
 
@@ -40,7 +54,10 @@ _SYSTEM_PROMPT = (
     "Evaluate candidates strictly against the stated CR intent. "
     "Confirm ONLY candidates that are DIRECTLY affected by the specific change "
     "described in the CR. Reject candidates that are merely topically related "
-    "but would not require modification due to this change. Be strict."
+    "but would not require modification due to this change. Be strict. "
+    "Pay close attention to the File path of each candidate — a function in an "
+    "unrelated service module (e.g. contract or payment service) is almost never "
+    "directly impacted by a CR targeting a different business feature."
 )
 
 
@@ -99,20 +116,46 @@ def validate_sis_candidates(
     """
     ordered = mitigate_lost_in_middle(candidates)
 
+    # Fix B: Enrich each candidate entry with file_path and reranker_score.
+    # file_path exposes the source module so the LLM can detect cross-domain
+    # false positives (e.g. a contract-service function ranked for a
+    # listing-form CR). reranker_score signals the cross-encoder's confidence
+    # and anchors the LLM's prior before it reads the snippet.
     candidate_block = "\n\n".join(
         f"[{i + 1}] ID: {c['node_id']}\n"
         f"Type: {c.get('node_type', 'unknown')}\n"
+        f"File: {c.get('file_path', 'unknown')}\n"
+        f"Reranker score: {c.get('reranker_score', 0.0):.3f}\n"
         f"Snippet: {c['text_snippet'][:400]}"
         for i, c in enumerate(ordered)
     )
 
+    # Fix A: Inject excluded_operations as a hard DO NOT confirm list when
+    # LLM Call #1 identified out-of-scope operations.  This provides an
+    # explicit exclusion signal to counteract retrieval false positives from
+    # modules that share vocabulary with the CR's domain but are functionally
+    # unrelated.
+    excluded_section = ""
+    if getattr(cr_interp, "excluded_operations", None):
+        ops_formatted = "\n".join(
+            f"  - {op}" for op in cr_interp.excluded_operations
+        )
+        excluded_section = (
+            f"\nOUT-OF-SCOPE OPERATIONS — these business operations are "
+            f"EXPLICITLY NOT changed by this CR.\n"
+            f"DO NOT confirm any candidate that primarily serves one of these "
+            f"operations, even if it shares vocabulary with the CR:\n"
+            f"{ops_formatted}\n"
+        )
+
     user_prompt = (
         f"Change Request Intent: {cr_interp.primary_intent}\n"
         f"Change Type: {cr_interp.change_type}\n"
-        f"Domain Concepts: {', '.join(cr_interp.affected_domain_concepts)}\n\n"
-        f"Evaluate each candidate below. Confirm ONLY if it is directly relevant "
-        f"to this specific change request. Be strict — reject topically related "
-        f"but functionally unaffected candidates.\n\n"
+        f"Domain Concepts: {', '.join(cr_interp.affected_domain_concepts)}\n"
+        f"{excluded_section}"
+        f"\nEvaluate each candidate below. Confirm ONLY if it is directly "
+        f"relevant to this specific change request. Be strict — reject "
+        f"topically related but functionally unaffected candidates.\n\n"
         f"{candidate_block}"
     )
 
