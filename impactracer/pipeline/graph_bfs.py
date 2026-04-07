@@ -37,13 +37,28 @@ EDGE CONFIGURATION (per Subbab III.2.4.2 and III.2.4.3)
         Edge A->B means A owns B (DEFINES_METHOD only).
         If A changes, find all B via graph.out_edges(A, edge_type).
 
+CONFIDENCE-TIERED BFS (Fix D, v3.3)
+    Seeds identified by the LLM validator as high-confidence (top-N by
+    reranker_score) receive unrestricted BFS depth for ALL edge types.
+    Seeds ranked below the top-N threshold are low-confidence: their
+    propagation via _LOW_CONF_CAPPED_EDGES (CALLS) is hard-capped at
+    max_depth=1 — only direct callers are included, preventing a weakly
+    confirmed seed from cascading deep through the call graph and
+    introducing large irrelevant caller subtrees.
+
+    Structural edges (RENDERS, TYPED_BY, IMPLEMENTS, INHERITS) are NOT
+    capped regardless of confidence tier, because these edges represent
+    compile-time structural dependencies that are unambiguously impacted
+    by any change to the seed node.
+
 CORRECTNESS INVARIANT
     len(result.sis_nodes) + len(result.propagated_nodes) == len(visited)
     Asserted at the end of bfs_propagate().
 
 ARCHITECTURAL CONSTRAINTS
     1. ZERO LLM calls. Entirely deterministic graph traversal.
-    2. Identical seeds + identical graph => identical CIS (pure BFS).
+    2. Identical seeds + identical graph + identical high_confidence_seeds
+       => identical CIS (pure BFS).
     3. Graph is loaded once into memory and NEVER modified.
     4. BFS (not DFS) guarantees nodes are discovered in depth order so
        NodeTrace.depth is always the minimum distance from any seed.
@@ -72,6 +87,15 @@ EDGE_CONFIG: dict[str, dict] = {
     "DEPENDS_ON_EXTERNAL": {"direction": "reverse", "max_depth": 1},
     "RENDERS":             {"direction": "reverse", "max_depth": 1},
 }
+
+# Fix D: Behavioral edge types subject to depth-capping for low-confidence
+# seeds.  CALLS is the primary source of false-positive propagation: a weakly
+# confirmed seed in an unrelated service module can reach dozens of unrelated
+# callers within 2-3 hops.  Capping low-confidence seeds to max_depth=1 for
+# CALLS limits inclusion to only the immediate direct callers, preserving
+# precision while retaining recall for genuine structural dependencies
+# (RENDERS, TYPED_BY, IMPLEMENTS, INHERITS remain uncapped for all seeds).
+_LOW_CONF_CAPPED_EDGES: frozenset[str] = frozenset({"CALLS"})
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +130,8 @@ def build_graph_from_sqlite(conn: sqlite3.Connection) -> nx.MultiDiGraph:
 def bfs_propagate(
     graph: nx.MultiDiGraph,
     seed_node_ids: list[str],
+    *,
+    high_confidence_seeds: frozenset[str] | None = None,
 ) -> CISResult:
     """Multi-seed BFS producing the Candidate Impact Set (CIS).
 
@@ -120,9 +146,23 @@ def bfs_propagate(
     Seeds not present in the graph are silently ignored -- they do not
     enter either sis_nodes or the visited set.
 
+    Fix D — Confidence-Tiered BFS:
+        If ``high_confidence_seeds`` is provided, seeds NOT in that set
+        are treated as low-confidence.  For low-confidence seeds, edge
+        types in ``_LOW_CONF_CAPPED_EDGES`` (CALLS) are hard-capped at
+        effective_max_depth=1 regardless of EDGE_CONFIG.  This prevents
+        a weakly confirmed seed from cascading 2-3 hops deep through
+        the call graph and inflating the CIS with unrelated callers.
+
     Args:
-        graph:          MultiDiGraph from build_graph_from_sqlite().
-        seed_node_ids:  Code node IDs from seed_resolver.py.
+        graph:                 MultiDiGraph from build_graph_from_sqlite().
+        seed_node_ids:         Code node IDs from seed_resolver.py.
+        high_confidence_seeds: Frozenset of seed node IDs that are
+                               high-confidence (top-N by reranker_score).
+                               Seeds absent from this set receive capped
+                               depth for _LOW_CONF_CAPPED_EDGES.
+                               Pass None to disable tiering (all seeds
+                               receive full EDGE_CONFIG depths).
 
     Returns:
         CISResult with sis_nodes (depth 0) and propagated_nodes (depth 1+).
@@ -151,8 +191,24 @@ def bfs_propagate(
     while queue:
         node, depth, chain, path, origin = queue.popleft()
 
+        # Fix D: determine whether the traversal's origin seed is
+        # high-confidence.  When tiering is active (high_confidence_seeds
+        # is not None) and the origin is NOT in the high-confidence set,
+        # behavioral edges in _LOW_CONF_CAPPED_EDGES are depth-capped at 1.
+        is_low_confidence = (
+            high_confidence_seeds is not None
+            and origin not in high_confidence_seeds
+        )
+
         for edge_type, cfg in EDGE_CONFIG.items():
-            if depth >= cfg["max_depth"]:
+            # Fix D: apply tighter depth cap for low-confidence seed origins
+            # on behavioral edge types (CALLS).  Structural edges (RENDERS,
+            # TYPED_BY, IMPLEMENTS, INHERITS) retain their standard depths.
+            effective_max_depth = cfg["max_depth"]
+            if is_low_confidence and edge_type in _LOW_CONF_CAPPED_EDGES:
+                effective_max_depth = min(effective_max_depth, 1)
+
+            if depth >= effective_max_depth:
                 continue   # depth cap for this edge type
 
             if cfg["direction"] == "reverse":

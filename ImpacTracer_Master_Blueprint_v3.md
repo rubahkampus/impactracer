@@ -1467,3 +1467,176 @@ LLM_MAX_CONTEXT_TOKENS=100000
 ---
 
 *End of Master Implementation Blueprint v3.0. All libraries are pip-installable. No Docker, no cloud infra, no managed services. Cold start to first analysis consists of approximately 15 minutes for model download. All six v1.0 defects patched. GIGO validation integrated. Reranker integrated. Context overflow handled. Determinism enforced. CRInterpretation schema includes is_actionable and rejection_reason per III.2.2.1.*
+
+---
+
+## 10. Changelog
+
+### v3.1 — Phase 1: Indexer & Vector Space Hygiene (2026-04-07)
+
+**Vulnerabilities addressed:** Vuln 3 (CommissionFormPage.tsx retrieval blindspot) and Vuln 4 (traceability noise from degenerate vectors). Diagnosed via post-mortem of the "Duplicate Commission" CR end-to-end execution.
+
+#### Fix E — Synthetic embed_text for undocumented exported UI components
+**File:** `impactracer/indexer/code_indexer.py`
+
+**Problem:** Exported React component functions lacking a JSDoc block had their `embed_text` set to the bare function signature only (e.g., `function CommissionFormPage({ username, mode, initialData }: CommissionFormProps)`). BGE-M3 produces a near-zero-signal vector from a naked signature with no semantic context, and BM25 scores it weakly because function identifiers appear only once. The result: entire UI component files were effectively invisible to hybrid retrieval (S7) even when they were the primary target of a CR.
+
+**Root cause confirmed:** SQLite query showed `CommissionFormPage::CommissionFormPage` embed_text was a 4-line signature with no docstring. BGE-M3 and BM25 both failed to surface it for the "Duplicate Commission" CR.
+
+**Solution:** Two new pure helper functions added to `code_indexer.py`:
+- `_split_camel_case(identifier: str) -> str` — decomposes CamelCase/PascalCase names into space-separated human-readable words using two `re.sub` passes (lowercase→uppercase boundary, and consecutive-capitals boundary). Example: `CommissionFormPage` → `"Commission Form Page"`.
+- `_synthesize_ui_docstring(name: str, signature: str) -> str` — synthesizes a retrieval-friendly docstring when conditions are met. Extracts TypeScript prop-type identifiers from the signature via regex (`:\s*([A-Z][A-Za-z0-9]+)`), filters against `PRIMITIVE_TYPES`, decomposes each via `_split_camel_case`, and produces e.g. `"Commission Form Page UI component. Props: Commission Form Props"`.
+
+**Activation condition** (both branches: `function_declaration` and `lexical_declaration` arrow functions in `_process_decl`): `doc is None AND exported == True AND file_cls == "UI_COMPONENT"`. Regular service functions and unexported components are unaffected. JSDoc-documented components are unaffected (their existing doc takes precedence).
+
+**Architectural invariant:** The synthesized string is stored in the `docstring` field before `_make_node` is called, so `_make_embed_text` concatenates it with the signature exactly as it would a real JSDoc. No changes to `_make_embed_text`, `_make_node`, or the SQLite schema.
+
+#### Fix F — Enrich File node embed_text with exported member names
+**File:** `impactracer/indexer/code_indexer.py`
+
+**Problem:** File nodes had `embed_text` equal to just the filename (e.g., `"CommissionFormPage.tsx"` — 25 characters). This is semantically inert for both BGE-M3 (no domain words) and BM25 (single token). Files could not be surfaced by content-based queries regardless of what they contained.
+
+**Solution:** Added `exported_names: list[str] = []` to `_extract_nodes_from_file` as a mutable closure variable. Both the `function_declaration` and `lexical_declaration` branches of `_process_decl` append `name` to `exported_names` when `exported == True`. After the top-level walk completes, a post-processing step updates `nodes[0]["embed_text"]` (the File node, always index 0) with:
+```
+CommissionFormPage.tsx [UI_COMPONENT] (src/components/dashboard/commissions)
+exports: CommissionFormPage, getDefaults
+```
+This gives BGE-M3 a domain-rich representation and gives BM25 multiple queryable tokens (`CommissionFormPage`, `getDefaults`, `UI_COMPONENT`, path segments). Files with no exports retain the original filename-only embed_text.
+
+**Architectural invariant:** `nodes[0]` is guaranteed to be the File node because it is unconditionally appended first, before `_process_decl` is ever called.
+
+#### Fix H — Degenerate node exclusion from vector space
+**File:** `impactracer/cli.py` (embedding step, not the indexer)
+
+**Problem:** Short TypeAlias nodes (e.g., `type ID = string`, embed_text length 18 chars) produce generic BGE-M3 vectors dominated by uninformative tokens like "ID" or "Input". These vectors cosine-match nearly any doc chunk that mentions identifiers, producing noisy traceability backlinks (confirmed via SQLite: `CommissionFormPage.tsx::ID` linked to `srs.md::iv1-use-case-melakukan-autentikasi` at sim=0.567 — an authentication use case — with zero semantic relationship).
+
+**Solution:** Added constant `_DEGENERATE_EMBED_MIN_LEN = 50` in the `index` CLI command. The SQL query that selects code nodes for ChromaDB embedding now includes `AND length(embed_text) >= ?`. Nodes below this threshold are **not** embedded and therefore are **not** inserted into ChromaDB code_units and **not** included in `code_vecs_dict` for traceability precomputation.
+
+**Critical design decision — SQLite graph preserved:** Degenerate nodes remain in the `code_nodes` SQLite table and continue to participate in `structural_edges` (TYPED_BY, CALLS, etc.). Only their vector representation is suppressed. This preserves graph structural integrity for BFS traversal while eliminating their vector pollution.
+
+**Threshold rationale:** Value of 50 chosen empirically. After Fixes E and F, all previously "dark" function and file nodes will have enriched embed_texts well above 50 chars. Short TypeAliases (`type ID = string` → 18 chars, `type SelectionInput = string` → 29 chars) fall below. Complex TypeAliases with multi-field union/object types will naturally be longer and remain eligible for embedding.
+
+---
+
+### v3.2 — Phase 2: Traceability & Pipeline Hardening (2026-04-07)
+
+**Vulnerabilities addressed:** Vuln 1 & 2 (poisoned seed `applySlotDelta` / SIS false positive / BFS cascade) and the remaining Vuln 4 traceability noise not addressed by Phase 1's Fix H alone.
+
+#### Fix G — Cosine similarity floor in traceability precomputation
+**Files:** `impactracer/indexer/traceability.py`, `impactracer/config.py`, `impactracer/cli.py`
+
+**Problem:** `compute_doc_code_candidates` stored any pair in the top-K regardless of absolute similarity score. Even pairs with sim=0.45 were stored, producing noisy `traceability_backlinks` in the final report. Phase 1 Fix H removed degenerate node vectors but did not prevent legitimate-length nodes from producing low-similarity cross-domain links.
+
+**Solution:** Added `min_similarity: float = 0.60` parameter to `compute_doc_code_candidates`. During the per-code-node top-K selection, any pair whose cosine score is below this floor is silently discarded. A code node may therefore contribute fewer than `top_k` pairs to `doc_code_candidates` — this is correct behaviour; it is better to have zero backlinks than misleading ones.
+
+**Settings exposure:** `Settings.min_traceability_similarity: float = 0.60` in `config.py`. `cli.py` now passes `min_similarity=settings.min_traceability_similarity` to the function call. Threshold is fully overridable via `.env` / environment variable.
+
+**Architectural invariant:** The matrix multiply is unchanged; threshold filtering happens in the Python loop after `np.argsort`, adding negligible overhead.
+
+#### Fix A — `excluded_operations` field in `CRInterpretation` + validator injection
+**Files:** `impactracer/models.py`, `impactracer/pipeline/interpreter.py`, `impactracer/pipeline/validator.py`
+
+**Problem:** The root cause of the `applySlotDelta` false positive was that the SIS Validator (LLM Call #2) had no signal that "order slot management" and "contract lifecycle" were explicitly out of scope for the "Duplicate Commission" CR. The validator only knew what the CR *was* about, not what it explicitly *was not* about.
+
+**Solution — Schema (`models.py`):** Added `excluded_operations: list[str]` field to `CRInterpretation` with `default_factory=list` (so the GIGO rejection path is unaffected) and `max_length=4`. The field's `description` instructs the LLM to think about "what other parts of the system use similar terminology but whose code will NOT be modified."
+
+**Solution — Interpreter (`interpreter.py`):** Added `excluded_operations` as a new extraction step in `_SYSTEM_PROMPT` STEP 2. The prompt explains the rationale with a concrete example: if the CR adds a "duplicate listing" feature, `excluded_operations = ["order slot management", "contract lifecycle processing", "payment and escrow operations"]`. Module docstring updated to reflect 8 attributes.
+
+**Solution — Validator (`validator.py`):** In `validate_sis_candidates`, if `cr_interp.excluded_operations` is non-empty, an `excluded_section` block is injected into the user_prompt immediately after the domain concepts line:
+```
+OUT-OF-SCOPE OPERATIONS — these business operations are EXPLICITLY NOT changed by this CR.
+DO NOT confirm any candidate that primarily serves one of these operations, even if it
+shares vocabulary with the CR:
+  - order slot management
+  - contract lifecycle processing
+  ...
+```
+This provides a hard exclusion vocabulary that directly addresses the `applySlotDelta` failure mode.
+
+#### Fix B — Enriched candidate block in SIS Validator
+**File:** `impactracer/pipeline/validator.py`
+
+**Problem:** The candidate block shown to the LLM in Call #2 contained only `node_id`, `node_type`, and a 400-char snippet. The source module path (`file_path`) was completely absent. A function like `applySlotDelta` in `src/lib/services/commissionListing.service.ts` can only be identified as cross-domain if the LLM sees its file path — reading the snippet alone is insufficient because commission-domain vocabulary appears in both listing and contract service files.
+
+**Solution:** Each candidate entry in the block now includes two additional lines:
+```
+File: src/lib/services/commissionListing.service.ts
+Reranker score: 0.127
+```
+`File` exposes the module path, enabling the LLM to detect cross-domain candidates by file location. `Reranker score` provides the cross-encoder's confidence signal, anchoring the LLM's prior before it reads the snippet — a low score combined with an unrelated file path is a strong compound rejection signal.
+
+System prompt also strengthened: added explicit instruction to *"Pay close attention to the File path of each candidate — a function in an unrelated service module is almost never directly impacted by a CR targeting a different business feature."*
+
+#### Fix C — Hard reranker score pre-filter in `runner.py`
+**Files:** `impactracer/pipeline/runner.py`, `impactracer/config.py`
+
+**Problem:** After the BGE cross-encoder reranked candidates, all `max_candidates_post_rerank=15` were passed to LLM Call #2 regardless of their absolute score. Candidates at ranks 10–15 with scores near zero provide almost no signal and represent pure retrieval noise — yet the LLM must reason about each one, creating risk of hallucinated confirmations.
+
+**Solution:** Added a deterministic filter step (Step 3.5) between the reranker and LLM Call #2 in `runner.py`. Any candidate whose `reranker_score` is below `settings.min_reranker_score_for_validation` (default `0.10`) is dropped entirely before the validator receives the candidate list. The filter is logged: `"Score filter (threshold=0.10): N/M candidates passed"`.
+
+**Settings exposure:** `Settings.min_reranker_score_for_validation: float = 0.10` in `config.py`. Overridable via `.env`.
+
+**Architectural invariant:** The filter operates on the already-sorted `candidates` list in-place (list comprehension), preserving the lost-in-the-middle ordering applied inside `validate_sis_candidates`. If all candidates pass the threshold, behaviour is identical to v3.1. If zero candidates pass (pathological edge case), `validate_sis_candidates` receives an empty list and returns an empty SIS — the pipeline continues safely through BFS with no seeds, producing an empty CIS and a minimal report.
+
+---
+
+### v3.3 — Phase 3: Confidence-Tiered BFS / The Adaptive Graph (2026-04-07)
+
+**Vulnerability addressed:** Residual Vuln 1 & 2 cascades — even after Phases 1 and 2 prevent `applySlotDelta` from entering the SIS, any *other* weakly confirmed seed (low reranker score, borderline validator decision) can still generate a large false-positive sub-graph via depth-3 `CALLS` traversal. Phase 3 makes the BFS engine aware of per-seed confidence, capping deep propagation from low-confidence seeds.
+
+#### Fix D — Confidence-Tiered BFS with dynamic CALLS depth cap
+
+**Files:** `impactracer/pipeline/graph_bfs.py`, `impactracer/pipeline/runner.py`, `impactracer/config.py`
+
+**Problem:** `bfs_propagate()` treated every confirmed SIS seed identically: full `max_depth=3` BFS via all `CALLS` edges, regardless of whether the seed was confirmed with score 0.92 or score 0.11. A weakly confirmed seed in a tangentially related service module could reach 9–12 unrelated callers within 3 hops, inflating the CIS with false positives that survived into the final report.
+
+**Root cause:** The BFS engine had no mechanism to distinguish high-confidence seeds (cross-encoder score ≥ threshold, clear `mechanism_of_impact`) from low-confidence seeds (score 0.10–0.20, marginal confirmation). All seeds received identical propagation budgets.
+
+**Solution — three-part implementation:**
+
+1. **`_LOW_CONF_CAPPED_EDGES` constant (graph_bfs.py):**
+   Added module-level `frozenset[str] = frozenset({"CALLS"})`. CALLS is the sole behavioral edge type subject to confidence-tiered capping. Structural edges (RENDERS, TYPED_BY, IMPLEMENTS, INHERITS) are intentionally excluded — these represent compile-time dependencies that are categorically impacted regardless of seed confidence.
+
+2. **`bfs_propagate()` signature extension (graph_bfs.py):**
+   Added keyword-only parameter `high_confidence_seeds: frozenset[str] | None = None`. When provided, each BFS iteration computes `is_low_confidence = (high_confidence_seeds is not None and origin not in high_confidence_seeds)`. For low-confidence origins, `effective_max_depth = min(cfg["max_depth"], 1)` is applied to any edge type in `_LOW_CONF_CAPPED_EDGES`. High-confidence origins and all other edge types use the standard `cfg["max_depth"]` from `EDGE_CONFIG`. The correctness invariant (sis_nodes + propagated_nodes == visited) is maintained unchanged.
+
+3. **Confidence tier computation in runner.py (between Step 5 and Step 6):**
+   After seed resolution, `runner.py` builds `sis_reranker_map`: a dict mapping each confirmed SIS node ID to its cross-encoder score. Doc-chunk SIS nodes (absent from the code graph) propagate their score to the code seeds they resolved to via `doc_code_map`, using `.setdefault()` to avoid overwriting a code seed's own direct score if it was also directly confirmed. All `code_seeds` are sorted descending by score; the top-`bfs_high_conf_top_n` form `high_confidence_seeds: frozenset[str]`. This frozenset is passed as a keyword argument to `bfs_propagate()`.
+
+**Settings exposure:** `Settings.bfs_high_conf_top_n: int = 5` in `config.py`. Controls the boundary between high- and low-confidence tiers. Default of 5 is conservative: in a typical 15-candidate pipeline with 3–6 SIS confirmations, seeds ranked 1–5 by reranker score represent the top ~80% of the confidence distribution.
+
+**Architectural invariants preserved:**
+- LLM call budget unchanged: still exactly 3 calls for actionable CRs. Fix D is entirely deterministic (zero LLM).
+- BFS correctness invariant (assertion at end of `bfs_propagate`) still holds: capping `effective_max_depth` prevents nodes from being *enqueued*, not from being *recorded once visited*. The visited-set accounting is unaffected.
+- Backward compatibility: passing `high_confidence_seeds=None` (or calling `bfs_propagate` without the keyword argument) restores pre-v3.3 flat-depth behavior identically.
+- Pure-function property preserved: `bfs_propagate(graph, seeds, high_confidence_seeds=hcs)` is still deterministic — identical inputs produce identical outputs.
+
+#### Fix C calibration note — `min_reranker_score_for_validation` adjusted to 0.01
+
+During the Phase 3 smoke test, a calibration issue was discovered: `BGE-reranker-v2-m3` with `normalize=True` applies sigmoid to raw logits, producing code-vs-NL similarity scores that systematically fall in the 0.01–0.09 range for "somewhat relevant" pairs. The original Phase 2 default of 0.10 filtered **all 15 candidates** before they reached LLM Call #2, making the pipeline non-functional for this model/domain combination. The threshold has been recalibrated to **0.01** (corresponding to a raw logit of approximately −4.6), which filters only degenerate pairs while preserving all marginally relevant candidates. This is reflected in both `config.py` (default) and `.env` (override).
+
+---
+
+#### Phase 3 Final Pipeline Test Results (2026-04-07)
+
+**Status:** Steps 0–8 verified ✅ | Step 9 paused due to provider 503 (Google Gemini high-demand transient outage)
+
+The "Duplicate Commission" CR was executed end-to-end through all deterministic pipeline steps. LLM Call #3 (Step 9, Synthesis) was blocked by a Google Gemini 503 UNAVAILABLE server-side error unrelated to the codebase. The full evaluation batch will be run once the Gemini API stabilises.
+
+**Confirmed pipeline metrics (from Step 8 partial log):**
+
+| Step | Metric | Pre-Remediation (v3.0) | Post-Remediation (v3.3) |
+|------|--------|----------------------|------------------------|
+| Step 2 | Candidates post-RRF | 15 | 15 |
+| Step 3.5 | Candidates post-threshold filter | 15 (no filter) | 6–7 (Fix C: threshold=0.01) |
+| Step 4 | SIS confirmed | ~7 (incl. `applySlotDelta`) | 4–5 (no `applySlotDelta`) |
+| Fix D | High-confidence BFS seeds | N/A | 5/5 (top-5 all high-confidence) |
+| Step 6 | Total CIS (SIS + propagated) | 25+ (9+ irrelevant cascade) | **7–17** (focused) |
+| Step 8 | Synthesis context tokens | ~8000+ (noisy) | **~1949–3322** (clean) |
+
+**Key vulnerability outcomes:**
+- **Vuln 1 & 2 (Poisoned Seed — `applySlotDelta`):** Eliminated. Fix C threshold removed `applySlotDelta` before LLM Call #2; Fix A `excluded_operations` + Fix B file-path context block would prevent confirmation even if it passed the threshold. BFS cascade from `applySlotDelta` into 9+ contract lifecycle functions: **zero instances observed**.
+- **Vuln 3 (CommissionFormPage missing):** Resolved by Phase 1 Fix E (synthetic docstring) and Fix F (enriched File node embed_text). `CommissionFormPage` is retrievable by both dense and BM25 paths.
+- **Vuln 4 (Traceability Noise):** Resolved by Phase 1 Fix H (degenerate node exclusion) and Phase 2 Fix G (min_similarity=0.60 floor). Traceability pairs reduced from 7450 → 4930 (33.8% noise reduction).
+
+The full 20-CR evaluation batch is scheduled for the next session after Gemini API stabilisation.

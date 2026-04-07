@@ -182,11 +182,21 @@ def index(
     code_embed_ids: list[str] = []
     code_vecs_arr = None
 
+    # Fix H: Exclude degenerate nodes whose embed_text is too short to produce
+    # a meaningful BGE-M3 vector.  Short TypeAlias nodes (e.g. `type ID = string`,
+    # 18 chars) generate generic vectors that pollute both ChromaDB retrieval and
+    # the traceability similarity matrix.  These nodes remain in SQLite so that
+    # TYPED_BY / graph edges are preserved; they are simply not embedded or
+    # included in traceability candidates.
+    _DEGENERATE_EMBED_MIN_LEN = 50
+
     code_rows = conn.execute(
         "SELECT node_id, embed_text, node_type, name, file_path, "
         "       file_classification, exported "
         "FROM code_nodes "
-        "WHERE embed_text IS NOT NULL AND embed_text != ''"
+        "WHERE embed_text IS NOT NULL AND embed_text != '' "
+        "AND length(embed_text) >= ?",
+        (_DEGENERATE_EMBED_MIN_LEN,),
     ).fetchall()
 
     if code_rows:
@@ -225,7 +235,10 @@ def index(
 
         t_tr = time.perf_counter()
         candidates = compute_doc_code_candidates(
-            code_vecs_dict, doc_vecs_dict, top_k=settings.top_k_traceability
+            code_vecs_dict,
+            doc_vecs_dict,
+            top_k=settings.top_k_traceability,
+            min_similarity=settings.min_traceability_similarity,  # Fix G
         )
         store_doc_code_candidates(conn, candidates)
         traceability_count = len(candidates)

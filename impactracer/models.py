@@ -8,9 +8,12 @@ RESPONSIBILITY
     No module may define ad-hoc dicts for cross-boundary data transfer.
 
 SCHEMAS DEFINED
-    1. CRInterpretation (LLM Call #1 output, 7 attributes).
+    1. CRInterpretation (LLM Call #1 output, 8 attributes).
        Includes is_actionable for GIGO validation and rejection_reason
        for early termination per Subbab III.2.2.1.
+       Fix A (v3.1): added excluded_operations field — 2-4 English phrases
+       naming operations explicitly out of scope for the CR.  Propagated
+       into LLM Call #2 as a hard DO NOT confirm list.
     2. CandidateVerdict and SISValidationResult (LLM Call #2 output).
        CandidateVerdict uses a 5-field structured Chain-of-Thought schema:
        function_purpose → mechanism_of_impact → justification → confirmed.
@@ -80,7 +83,7 @@ class CRInterpretation(BaseModel):
 
     The LLM MUST first assess is_actionable. If False, rejection_reason
     is populated and the pipeline halts before any retrieval occurs.
-    If True, all remaining six fields are populated.
+    If True, all remaining seven fields are populated.
     """
 
     is_actionable: bool = Field(
@@ -113,6 +116,21 @@ class CRInterpretation(BaseModel):
         ),
         min_length=2,
         max_length=3,
+    )
+    excluded_operations: list[str] = Field(
+        default_factory=list,
+        description=(
+            "2-4 English phrases naming business operations that are "
+            "EXPLICITLY OUT OF SCOPE for this CR.  These describe what the "
+            "CR does NOT change — e.g. if the CR adds a 'duplicate listing' "
+            "feature, excluded operations might include 'order slot management', "
+            "'contract lifecycle', 'payment processing'. "
+            "Used as a hard DO NOT confirm list in the SIS Validator (LLM Call #2) "
+            "to prevent poisoned-seed false positives from topically related but "
+            "functionally unaffected modules. Leave empty ([]) only if no "
+            "meaningful out-of-scope operations can be identified."
+        ),
+        max_length=4,
     )
 
 

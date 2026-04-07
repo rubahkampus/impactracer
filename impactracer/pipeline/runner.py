@@ -159,6 +159,30 @@ def run_analysis(cr_text: str, settings: Settings) -> ImpactReport:
         len(candidates), time.perf_counter() - t3,
     )
 
+    # ── Step 3.5: Fix C — Hard reranker score threshold filter ────────────
+    # Drop candidates whose cross-encoder score falls below the minimum
+    # threshold before they reach LLM Call #2.  Bottom-ranked candidates
+    # with near-zero cross-encoder scores are retrievals that share surface
+    # vocabulary with the CR but have no functional relationship.  Sending
+    # them to the LLM introduces the risk of hallucinated
+    # mechanism_of_impact reasoning producing false-positive SIS seeds,
+    # which then cascade through BFS into large irrelevant node sets.
+    # Calibration note: BGE-reranker-v2-m3 with normalize=True applies sigmoid
+    # to raw logits; code-vs-NL pairs typically score 0.01-0.15.  Threshold is
+    # set to 0.01 (logit ≈ -4.6) to filter only degenerate pairs while
+    # preserving all marginally relevant candidates for LLM Call #2.
+    pre_filter_count = len(candidates)
+    candidates = [
+        c for c in candidates
+        if c.get("reranker_score", 0.0) >= settings.min_reranker_score_for_validation
+    ]
+    logger.info(
+        "Score filter (threshold={:.2f}): {}/{} candidates passed",
+        settings.min_reranker_score_for_validation,
+        len(candidates),
+        pre_filter_count,
+    )
+
     # ── Step 4: LLM Call #2 — Validate SIS ───────────────────────────────
     logger.info("Step 4: Validating SIS (LLM Call #2)...")
     t4 = time.perf_counter()
@@ -187,10 +211,40 @@ def run_analysis(cr_text: str, settings: Settings) -> ImpactReport:
         time.perf_counter() - t5,
     )
 
+    # ── Fix D: Compute confidence tier for BFS seeds ──────────────────────
+    # Build a reranker_score map for all confirmed SIS node IDs, then
+    # propagate each doc-chunk SIS node's score to the code seeds it resolved
+    # to (doc-chunk nodes are absent from the graph; their resolved code seeds
+    # inherit the doc-chunk's cross-encoder confidence).
+    # Seeds ranked in the top-N (bfs_high_conf_top_n) by reranker_score
+    # receive full BFS depth for all edge types; seeds ranked below that
+    # threshold have CALLS capped at max_depth=1 inside bfs_propagate().
+    sis_reranker_map: dict[str, float] = {
+        c["node_id"]: c.get("reranker_score", 0.0)
+        for c in candidates
+        if c["node_id"] in set(sis_node_ids)
+    }
+    # Propagate doc-chunk SIS scores to their resolved code seeds
+    for doc_id, resolved_codes in doc_code_map.items():
+        doc_score = sis_reranker_map.get(doc_id, 0.0)
+        for code_id in resolved_codes:
+            sis_reranker_map.setdefault(code_id, doc_score)
+    # Sort all code seeds by score descending; top-N are high-confidence
+    sorted_seeds = sorted(
+        code_seeds,
+        key=lambda n: sis_reranker_map.get(n, 0.0),
+        reverse=True,
+    )
+    high_confidence_seeds = frozenset(sorted_seeds[:settings.bfs_high_conf_top_n])
+    logger.info(
+        "Fix D: {}/{} BFS seeds classified as high-confidence (top-{} by reranker)",
+        len(high_confidence_seeds), len(code_seeds), settings.bfs_high_conf_top_n,
+    )
+
     # ── Step 6: BFS propagation (deterministic, zero LLM) ─────────────────
     logger.info("Step 6: BFS propagation...")
     t6 = time.perf_counter()
-    cis = bfs_propagate(graph, code_seeds)
+    cis = bfs_propagate(graph, code_seeds, high_confidence_seeds=high_confidence_seeds)
     logger.info(
         "CIS: {} SIS + {} propagated = {} total ({:.1f}s)",
         len(cis.sis_nodes), len(cis.propagated_nodes),

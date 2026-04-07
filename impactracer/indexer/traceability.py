@@ -19,12 +19,19 @@ ALGORITHM
     2. L2-normalize both matrices row-wise.
     3. Compute sim = C @ D.T (pure matrix multiply).
     4. For each code row, take top-K doc indices by descending score.
-    5. Insert (code_id, doc_id, similarity) into SQLite.
+    5. Apply min_similarity threshold — discard any pair below the floor.
+    6. Insert surviving (code_id, doc_id, similarity) pairs into SQLite.
 
 ARCHITECTURAL CONSTRAINTS
     Zero LLM calls. Pure linear algebra via numpy.
     O(N_code * N_doc * D) complexity. At Haidar scale (500 * 100 * 1024)
     this is approximately 50M FLOPs and completes in under one second.
+
+    Fix G (v3.1): min_similarity parameter (default 0.60) prevents
+    low-signal pairs from polluting doc_code_candidates.  Pairs below
+    the threshold produce noisy traceability_backlinks in the final
+    report and inject irrelevant doc context into LLM Call #3.
+    Exposed as settings.min_traceability_similarity in config.py.
 """
 from __future__ import annotations
 
@@ -37,19 +44,30 @@ def compute_doc_code_candidates(
     code_vecs: dict[str, np.ndarray],
     doc_vecs: dict[str, np.ndarray],
     top_k: int = 5,
+    min_similarity: float = 0.60,
 ) -> list[tuple[str, str, float]]:
     """Brute-force cosine similarity between all code and doc vectors.
 
+    For each code node the top-K most similar doc chunks are found; only
+    pairs whose cosine similarity meets or exceeds ``min_similarity`` are
+    retained.  A code node may therefore contribute fewer than top_k pairs
+    if its best-matching docs all fall below the threshold.
+
     Args:
-        code_vecs: Mapping of node_id → (D,) float32 vector for each code unit.
-        doc_vecs:  Mapping of chunk_id → (D,) float32 vector for each doc chunk.
-        top_k:     Number of highest-scoring doc chunks to retain per code unit.
+        code_vecs:      Mapping of node_id → (D,) float32 vector for each
+                        code unit.
+        doc_vecs:       Mapping of chunk_id → (D,) float32 vector for each
+                        doc chunk.
+        top_k:          Maximum doc chunks to consider per code unit before
+                        threshold filtering (acts as an upper bound).
+        min_similarity: Minimum cosine similarity for a pair to be stored.
+                        Pairs below this floor are discarded.  Default 0.60
+                        (exposed as settings.min_traceability_similarity).
 
     Returns:
-        List of (code_id, doc_id, similarity) tuples, where similarity is the
-        cosine similarity in [-1, 1]. Each code unit contributes at most top_k
-        tuples. Tuples are in descending similarity order within each code unit
-        but are not globally sorted.
+        List of (code_id, doc_id, similarity) tuples where similarity >=
+        min_similarity. Tuples are in descending similarity order within
+        each code unit but are not globally sorted.
 
     Complexity: O(N_code × N_doc × D) for the matrix multiply.
     At Haidar scale (500 × 100 × 1024): ~50M FLOPs → sub-second.
@@ -73,7 +91,13 @@ def compute_doc_code_candidates(
     for i, cid in enumerate(code_ids):
         top_j = np.argsort(sim[i])[::-1][:top_k]
         for j in top_j:
-            results.append((cid, doc_ids[j], float(sim[i, j])))
+            score = float(sim[i, j])
+            # Fix G: discard pairs below the minimum similarity threshold.
+            # Without this gate, generic-vector nodes (short TypeAliases,
+            # undocumented functions) produce noisy backlinks to unrelated
+            # doc chunks, degrading traceability accuracy in the final report.
+            if score >= min_similarity:
+                results.append((cid, doc_ids[j], score))
 
     return results
 

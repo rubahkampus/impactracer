@@ -47,12 +47,21 @@ class Settings(BaseSettings):
 
     # Indexer
     top_k_traceability: int = 5
+    # Fix G: minimum cosine similarity for a doc-code pair to be stored in
+    # doc_code_candidates.  Pairs below this threshold produce noisy backlinks
+    # and pollute the traceability signal seen by LLM Call #3.
+    min_traceability_similarity: float = 0.60
 
     # Retrieval
     max_candidates_per_query: int = 15
     max_candidates_post_rrf: int = 15
     max_candidates_post_rerank: int = 15
     rrf_k: int = 60
+    # Fix C: candidates whose cross-encoder reranker_score is below this
+    # threshold are dropped before LLM Call #2 (SIS Validator).  Prevents
+    # bottom-ranked, weakly-related nodes from reaching the LLM where they
+    # risk being confirmed via hallucinated mechanism_of_impact reasoning.
+    min_reranker_score_for_validation: float = 0.01
 
     # BFS
     bfs_global_max_depth: int = 3
@@ -61,6 +70,12 @@ class Settings(BaseSettings):
         "DEPENDS_ON_EXTERNAL",
         "RENDERS",
     ]
+    # Fix D: Seeds ranked in the top-N by reranker_score are considered
+    # "high-confidence" and receive unrestricted BFS depth for all edge types.
+    # Seeds ranked below this threshold have behavioral edges (CALLS) hard-capped
+    # at max_depth=1 to prevent low-confidence seeds from cascading through deep
+    # CALLS chains and introducing irrelevant callers into the CIS.
+    bfs_high_conf_top_n: int = 5
 
     # Context Window
     llm_max_context_tokens: int = 100_000

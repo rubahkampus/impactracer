@@ -247,6 +247,72 @@ def _make_embed_text(name: str, signature: str, docstring: str | None) -> str:
     return "\n".join(parts)
 
 
+# ── Fix E helpers: CamelCase decomposition + synthetic UI component docstring ──
+
+def _split_camel_case(identifier: str) -> str:
+    """Decompose a CamelCase/PascalCase identifier into space-separated words.
+
+    Handles both standard PascalCase and runs of consecutive capitals (e.g.
+    'HTMLParser' → 'HTML Parser').
+
+    Examples:
+        'CommissionFormPage' → 'Commission Form Page'
+        'getDefaults'        → 'get Defaults'
+        'applySlotDelta'     → 'apply Slot Delta'
+    """
+    # Insert space between a lowercase/digit char and an uppercase char
+    words = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", identifier)
+    # Insert space between a run of uppercase chars and an uppercase+lowercase
+    # sequence so 'HTMLParser' becomes 'HTML Parser' instead of 'H T M L Parser'
+    words = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", words)
+    return words
+
+
+def _synthesize_ui_docstring(name: str, signature: str) -> str:
+    """Synthesize a retrieval-friendly docstring for undocumented exported UI components.
+
+    Called only when: node_type='Function', exported=True,
+    file_cls='UI_COMPONENT', and no JSDoc was found in the source.
+
+    Strategy:
+      1. Decompose the CamelCase name into a human-readable label.
+      2. Extract TypeScript prop-type identifiers from the signature via a
+         regex matching ': UpperCaseType' patterns.
+      3. Compose: '<Readable Name> UI component. Props: <PropType>, ...'
+
+    The resulting string is stored as the node's docstring, so _make_embed_text
+    will prepend it to the raw signature — giving BGE-M3 rich semantic content
+    even when the developer did not write a JSDoc block.
+
+    Args:
+        name:      Raw function identifier (e.g. 'CommissionFormPage').
+        signature: Function signature string from _get_signature().
+
+    Returns:
+        Non-empty synthetic docstring string.
+    """
+    readable = _split_camel_case(name)
+
+    # Extract TypeScript type identifiers that start with an uppercase letter.
+    # Matches patterns like '}: CommissionFormProps)' and 'data: SomeType'.
+    raw_types = re.findall(r":\s*([A-Z][A-Za-z0-9]+)", signature)
+
+    seen: set[str] = set()
+    prop_descriptions: list[str] = []
+    for t in raw_types:
+        # Filter out primitives, React builtins, and duplicates
+        if t not in PRIMITIVE_TYPES and t not in seen:
+            seen.add(t)
+            prop_descriptions.append(_split_camel_case(t))
+        if len(prop_descriptions) == 2:  # cap at 2 for brevity
+            break
+
+    docstring = f"{readable} UI component"
+    if prop_descriptions:
+        docstring += f". Props: {', '.join(prop_descriptions)}"
+    return docstring
+
+
 # ── Type identifier extraction for TYPED_BY ────────────────────────────
 
 def _collect_type_identifiers(type_node) -> list[str]:
@@ -447,6 +513,9 @@ def _extract_nodes_from_file(
     root = tree.root_node
 
     nodes: list[dict] = []
+    # Fix F: collect exported member names so we can enrich the File node
+    # embed_text after the top-level walk (lists are mutable → no nonlocal needed).
+    exported_names: list[str] = []
 
     # File node
     nodes.append(_make_node(
@@ -479,6 +548,15 @@ def _extract_nodes_from_file(
             sig = _get_signature(decl_node, name, source_bytes)
             doc = _extract_preceding_jsdoc(decl_node.start_point[0], source_lines)
             src = _node_text(decl_node, source_bytes)
+            # Fix E: Synthesize a retrieval-friendly docstring for exported UI
+            # component functions that lack a JSDoc block.  Without this, the
+            # embed_text is just the bare signature, producing a near-zero-signal
+            # vector that hybrid retrieval will never surface.
+            if doc is None and exported and file_cls == "UI_COMPONENT":
+                doc = _synthesize_ui_docstring(name, sig)
+            # Fix F: Track exported names for File-node embed_text enrichment.
+            if exported:
+                exported_names.append(name)
             nodes.append(_make_node(
                 node_id=f"{rel}::{name}",
                 node_type="Function",
@@ -517,6 +595,13 @@ def _extract_nodes_from_file(
                     sig = f"const {name} = " + _node_text(value_node, source_bytes)[:200]
                 doc = _extract_preceding_jsdoc(decl_node.start_point[0], source_lines)
                 src = _node_text(vd, source_bytes)
+                # Fix E: Synthesize docstring for undocumented exported arrow-function
+                # UI components (same rationale as the function_declaration branch).
+                if doc is None and exported and file_cls == "UI_COMPONENT":
+                    doc = _synthesize_ui_docstring(name, sig)
+                # Fix F: Track exported names for File-node embed_text enrichment.
+                if exported:
+                    exported_names.append(name)
                 nodes.append(_make_node(
                     node_id=f"{rel}::{name}",
                     node_type="Function",
@@ -686,6 +771,22 @@ def _extract_nodes_from_file(
             _process_decl(inner, exported=True)
         else:
             _process_decl(top_node, exported=False)
+
+    # Fix F: Enrich the File node's embed_text with classification context and
+    # the list of exported member names collected during the top-level walk.
+    # Before this fix the File node's embed_text was just the bare filename
+    # (e.g. "CommissionFormPage.tsx"), which is near-zero semantic signal for
+    # BGE-M3 and BM25 — making entire files invisible to hybrid retrieval.
+    if exported_names:
+        path_parts = rel.replace("\\", "/").split("/")
+        dir_context = "/".join(path_parts[:-1]) if len(path_parts) > 1 else ""
+        cls_label = f" [{file_cls}]" if file_cls else ""
+        enriched_embed = (
+            f"{file_path.name}{cls_label}"
+            + (f" ({dir_context})" if dir_context else "")
+            + f"\nexports: {', '.join(exported_names)}"
+        )
+        nodes[0]["embed_text"] = enriched_embed
 
     return nodes
 
