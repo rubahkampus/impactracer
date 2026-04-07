@@ -7,7 +7,7 @@
 
 ## 0. Changelog
 
-### v3.1 Changes from v3.0
+### v3.01 Changes from v3.0
 
 - **[CRITICAL] Universal graceful truncation added to all LLM output models.** Introduced `TruncatingModel`, a shared Pydantic `BaseModel` subclass in `models.py`. It carries a `@model_validator(mode='before')` that inspects every string field for a declared `max_length` constraint and silently truncates the value to that limit before Pydantic runs field-level validation. `CandidateVerdict`, `ImpactedItem`, and `ImpactReport` now inherit from `TruncatingModel` instead of `BaseModel`. **Motivation:** LLMs cannot reliably count characters; strict `max_length` constraints were causing `ValidationError` pipeline crashes (observed in Step 4, LLM Call #2 `CandidateVerdict.justification`). The architectural rule is stated below in §2 and applies to all future LLM output schemas in this project.
 
