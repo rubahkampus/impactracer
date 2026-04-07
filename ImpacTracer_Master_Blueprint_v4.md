@@ -559,22 +559,9 @@ Requires new AST passes and one new SQLite column. Estimated implementation: 3�
 
 #### P4.B.1 — AST Skeletonization: Primary (SIS Validation) [OFFLINE + ONLINE]
 
-**Rationale:** In v3.3, `validator.py` sends `text_snippet[:400]` to LLM Call #2. This
-naive 400-character window has two failure modes:
+**Rationale**: In v3.3, the retrieval step maps ChromaDB's documents field (which stores the embed_text consisting only of the docstring and signature) to a text_snippet field. validator.py sends this text_snippet to LLM Call #2. Because the LLM only sees the docstring and signature, it is completely blind to the internal logic of the function. It receives no information about the control flow, external calls, or data dependencies, forcing it to guess the impact based solely on the "cover of the book."
 
-1. **Truncation mid-logic:** For a TypeScript function with 30-character imports and a
-   20-line React component body, the 400-char slice often cuts off at line 8 of the
-   return statement — in the middle of JSX markup. The LLM receives no information about
-   the control flow or external calls.
-
-2. **Boilerplate saturation:** For JSX-heavy components, the first 400 characters may
-   consist almost entirely of HTML-like markup (`<div className="..."><span>...</span>`).
-   The LLM receives no information about the component's data dependencies, API calls,
-   or business logic.
-
-A **skeleton** representation folds syntactic boilerplate while preserving the
-semantically dense elements: imports, function signatures, external calls, conditional
-branches, type annotations, and return structure.
+A  **skeleton** representation solves this by using the full source_code stored in SQLite to fold syntactic boilerplate while preserving the semantically dense elements: imports, function signatures, external calls, conditional branches, type annotations, and return structure.
 
 **Skeletonization Algorithm:**
 
@@ -597,20 +584,13 @@ Uses the tree-sitter parse tree of the node's `source_code` to identify and repl
 
 Before (v3 text_snippet[:400]):
 ```typescript
-function CommissionListingCard({
-  listing,
-  onDuplicate,
-}: CommissionListingCardProps) {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [duplicating, setDuplicating] = useState(false);
-
-  return (
-    <div className="rounded-lg border border-gray-200 p-4 hover:shadow-md transition-shadow cursor-pointer">
-      <div className="flex justify-between items-start mb-3">
-        <div className="flex-1">
-          <h3 className="font-semibold text-gray-900 text-sm truncate">{li
+/**
+ * Renders a card for a commission listing with actions.
+ * @param props - CommissionListingCardProps
+ */
+function CommissionListingCard({ listing, onDuplicate }: CommissionListingCardProps)
 ```
-*(truncates mid-JSX at 400 chars)*
+*(The LLM sees this and nothing else — no logic, no state, no API calls)*
 
 After (v4 skeleton_snippet):
 ```typescript
@@ -626,19 +606,17 @@ function CommissionListingCard({ listing, onDuplicate }: CommissionListingCardPr
 }
 ```
 
-The skeleton is approximately 60–70% shorter for UI components while preserving 100%
-of the semantically relevant external calls, props, and control flow that the LLM needs
-to evaluate impact.
+The skeleton preserves 100% of the semantically relevant external calls, props, and control flow that the LLM needs to evaluate impact, which were previously entirely missing.
 
 **Schema Addition:** See §4.1 — `skeleton_snippet TEXT` column in `code_nodes`.
 
 **Integration in `validator.py`:**
 ```python
 # Before (v3):
-f"Snippet: {c['text_snippet'][:400]}"
+f"Snippet: {c.get('text_snippet', '')}"
 
 # After (v4):
-snippet = c.get("skeleton_snippet") or c["text_snippet"][:400]
+snippet = c.get("skeleton_snippet") or c.get("text_snippet", "")
 f"Snippet: {snippet}"
 ```
 
@@ -1021,14 +999,12 @@ body (see §P4.B.1). It is `NULL` for nodes where skeletonization is not applica
 (e.g., `TypeAlias`, `Interface`, `ExternalPackage`, `File` node types) or where the
 source is shorter than the skeleton threshold (< 200 chars — no benefit from folding).
 
-`text_snippet` (currently derived from `source_code[:800]` in the enrichment step) is
-retained for full backward compatibility with v3.3 validation paths and the
-`use_skeleton_snippet_for_validation: False` fallback mode.
+**Note on Backward Compatibility**: In v3.3, text_snippet is not a real database column; it is an alias assigned at retrieval time from ChromaDB's documents field (which stores the embed_text containing the docstring+signature). The full original source_code and the embed_text columns remain untouched in SQLite. The fallback mode (use_skeleton_snippet_for_validation: False) will seamlessly revert to using the retrieved text_snippet.
 
 **Column population:**
 Populated by the new `_skeletonize_node()` function in `code_indexer.py` during Pass 1,
-after `source_code` is extracted. Stored directly in SQLite at index time. Not embedded;
-used only at validation and synthesis time.
+after `source_code` is extracted. 
+Stored directly in SQLite at index time. Not embedded; used only at validation and synthesis time.
 
 ---
 
@@ -1428,7 +1404,7 @@ backlinks seen by LLM Call #3 to the most architecturally coherent evidence.
 | S3.5 | Score filter (0.01) | Score filter (0.01) | No change |
 | S3.6 | — | Semantic deduplication gate | NEW |
 | S3.7 | — | File-density plausibility gate + Fix I affinity mask | NEW |
-| S4 | LLM + text_snippet[:400] | LLM + skeleton_snippet | MOD |
+| S4 | LLM + text_snippet (signature only) | LLM + skeleton_snippet | MOD |
 | S5 | Seed resolution + Fix D | Seed resolution + Fix D | No change |
 | S6 | BFS (8 edge types) | BFS (13 edge types) | +5 edge types |
 | S7 | Backlinks + snippets | Backlinks + snippets | No change |
@@ -1453,7 +1429,7 @@ Ground Truth evaluation dataset once available.
 | Recall@10 (service layer CRs) | ~0.40 | **~0.55–0.70** | P4.B.2 + P4.C.1 |
 | Traceability pairs (noise) | 4,930 | **~3,200–3,800** | P4.A.5 Fix I |
 | Indexing time (1-2 file change) | 3–8 min | **< 30 sec** | P4.A.4 Incremental |
-| Validator context quality (token efficiency) | text_snippet[:400] | **skeleton_snippet** | P4.B.1 |
+| Validator context quality (token efficiency) | text_snippet (signature only) | skeleton_snippet (full logic map) | P4.B.1 |
 | False-positive cascade depth | depth 2 (9 nodes) | **depth 0 (0 nodes)** | P4.A.2 Gate |
 
 ---
