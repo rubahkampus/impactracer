@@ -112,7 +112,7 @@ def validate_sis_candidates(
 
     Returns:
         SISValidationResult with one CandidateVerdict per candidate.
-        Confirmed verdicts form the Seed Impact Set (SIS).
+        Confirmed verdicts form the Starting Impact Set (SIS).
     """
     ordered = mitigate_lost_in_middle(candidates)
 
